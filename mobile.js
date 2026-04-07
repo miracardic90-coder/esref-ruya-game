@@ -33,6 +33,7 @@
   bind('jUp','ArrowUp');bind('jDown','ArrowDown');
   bind('jLeft','ArrowLeft');bind('jRight','ArrowRight');
   bind('btnShoot','Space');bind('btnDash','ShiftLeft');bind('btnReload','KeyR');
+  bind('btnAbility','KeyQ');
 
   // Overlay ekranlarda canvas'a dokunma = Enter
   document.getElementById('c').addEventListener('touchstart',e=>{

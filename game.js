@@ -48,12 +48,22 @@ const me = {
 };
 
 // ---- ROLLER ----
+// abilityCdLeft ve shieldActive server'dan gelir
+let sSlowZones = [];
+let sRadarActive = false;
+let myAbilityCd = 0;
+let abilityFxList = []; // görsel efektler
 const ROLE_CFG = {
-  esref:   { icon:'🕴', color:'#c8a84b', glow:'#c8a84b', label:'EŞREF',   suit:'#1c2340', tie:'#c8a84b', hair:'#1a0a00' },
-  nisan:   { icon:'🎵', color:'#ff88aa', glow:'#ff4488', label:'NİSAN',   suit:'#c06080', tie:null,      hair:'#1a0800' },
-  'gurdalı':{ icon:'💪', color:'#6090ff', glow:'#4070dd', label:'GÜRDALII', suit:'#1a3060', tie:'#4488ff', hair:'#111' },
-  muslum:  { icon:'🔧', color:'#60d080', glow:'#40b060', label:'MÜSLÜM',  suit:'#1a4030', tie:'#40c060', hair:'#222' },
-  faruk:   { icon:'🎯', color:'#d0a040', glow:'#b08020', label:'FARUK',   suit:'#3a2810', tie:'#c08030', hair:'#2a1800' },
+  esref:   { icon:'🕴', color:'#c8a84b', glow:'#c8a84b', label:'EŞREF',   suit:'#1c2340', tie:'#c8a84b', hair:'#1a0a00', abilityName:'KALKAN',  abilityKey:'Q' },
+  nisan:   { icon:'🎵', color:'#ff88aa', glow:'#ff4488', label:'NİSAN',   suit:'#c06080', tie:null,      hair:'#1a0800', abilityName:'MÜZİK',   abilityKey:'Q' },
+  'gurdalı':{ icon:'💪', color:'#6090ff', glow:'#4070dd', label:'GÜRDALII', suit:'#1a3060', tie:'#4488ff', hair:'#111',    abilityName:'TANK',    abilityKey:'Q' },
+  muslum:  { icon:'🔧', color:'#60d080', glow:'#40b060', label:'MÜSLÜM',  suit:'#1a4030', tie:'#40c060', hair:'#222',    abilityName:'İYİLEŞTİR',abilityKey:'Q' },
+  faruk:   { icon:'🎯', color:'#d0a040', glow:'#b08020', label:'FARUK',   suit:'#3a2810', tie:'#c08030', hair:'#2a1800', abilityName:'SNİPER',  abilityKey:'Q' },
+  kadir:   { icon:'😈', color:'#ff4444', glow:'#cc0000', label:'KADİR',   suit:'#2a0808', tie:'#ff2020', hair:'#1a0000', abilityName:'SABOTAJ', abilityKey:'Q' },
+  cigdem:  { icon:'🔍', color:'#a0d0ff', glow:'#60a0ff', label:'ÇİĞDEM',  suit:'#102040', tie:'#60a0ff', hair:'#0a1020', abilityName:'RADAR',   abilityKey:'Q' },
+};
+const ABILITY_CDS = {
+  esref:300, nisan:240, 'gurdalı':360, muslum:280, faruk:200, kadir:400, cigdem:220
 };
 const ROOM_NAMES = ['Ravena Hotel — Düğün Salonu','İstanbul Sokakları','Yetimler Karargahı'];
 const ROOM_BGS   = ['hotel','street','base'];
@@ -93,8 +103,12 @@ socket.on('roleAssigned', d => {
   document.getElementById('revealIcon').textContent = cfg.icon;
   document.getElementById('revealName').textContent = cfg.label;
   document.getElementById('revealDesc').textContent = myRole === 'esref'
-    ? 'Sen Eşref\'sin! Diğer oyuncuları koru. Sen ölürsen oyun biter. Daha fazla hasar verirsin.'
-    : `Sen ${cfg.label}\'sin. Eşref seni koruyacak. Hayatta kal ve düşmanları yavaşlat!`;
+    ? 'Sen Eşref\'sin! Diğer oyuncuları koru. Sen ölürsen oyun biter. Daha fazla hasar verirsin. [Q] Kalkan aktive et.'
+    : myRole === 'kadir'
+    ? '😈 Sen KADİR\'sin! Kimse bilmiyor. [Q] ile bir takım arkadaşının silahını boşalt. Oyunu sabote et!'
+    : myRole === 'cigdem'
+    ? '🔍 Sen Çiğdem\'sin! [Q] ile Radar aktive et — tüm düşmanlar görünür olur.'
+    : `Sen ${cfg.label}\'sin. [Q] ile özel yeteneğini kullan: ${cfg.abilityName}`;
   document.getElementById('roleTag').textContent = cfg.icon + ' ' + cfg.label;
   document.getElementById('roleTag').style.color = cfg.color;
 });
@@ -111,6 +125,8 @@ socket.on('gameStart', d => {
 socket.on('tick', d => {
   sEnemies  = d.enemies;
   sEBullets = d.eBullets;
+  sSlowZones = d.slowZones || [];
+  sRadarActive = d.radarActive || false;
   for (const [id, p] of Object.entries(d.players)) {
     if (id !== socket.id) sPlayers[id] = p;
     else {
@@ -118,6 +134,7 @@ socket.on('tick', d => {
       me.ammo     = p.ammo;
       me.reloading= p.reloading;
       me.alive    = p.alive;
+      myAbilityCd = p.abilityCdLeft || 0;
     }
   }
 });
@@ -127,7 +144,21 @@ socket.on('bullet', d => {
     cBullets.push({ x:d.x, y:d.y, vx:d.vx, vy:d.vy, life:50, r:3, role:d.role });
 });
 
-socket.on('hit', d => {
+socket.on('abilityFx', d => {
+  abilityFxList.push({ ...d, life: 45 });
+  if (d.type === 'heal') spawnParticles(d.x, d.y, '#60d080', 12);
+  if (d.type === 'shield') spawnParticles(d.x, d.y, '#c8a84b', 10);
+  if (d.type === 'tank') spawnParticles(d.x, d.y, '#6090ff', 10);
+  if (d.type === 'music') spawnParticles(d.x, d.y, '#ff88aa', 10);
+  if (d.type === 'sniper') spawnParticles(d.tx||d.x, d.ty||d.y, '#d0a040', 14);
+  if (d.type === 'radar') spawnParticles(d.x, d.y, '#a0d0ff', 12);
+});
+
+socket.on('sabotaged', d => {
+  showDialog('⚠️ SABOTAJ', 'Silahın boşaltıldı! Kadir aramızda...');
+  setTimeout(hideDialog, 3000);
+  screenShake = 15;
+});
   spawnParticles(d.ex, d.ey, d.dead ? '#c8a84b' : '#ff8844', d.dead ? 14 : 6);
   if (d.dead) screenShake = 8;
 });
@@ -231,6 +262,13 @@ function update() {
     spawnParticles(me.x,me.y-14,'#c8a84b',5);
   }
 
+  // Yetenek (Q)
+  if (keys['KeyQ'] && myAbilityCd === 0 && !me._abilityCd) {
+    socket.emit('ability');
+    me._abilityCd = true;
+    setTimeout(() => me._abilityCd = false, 500);
+  }
+
   // Pozisyon gönder
   if (frameCount%2===0) socket.emit('move',{x:me.x,y:me.y,angle:me.angle});
 
@@ -274,6 +312,8 @@ function draw() {
   }
   ctx.clearRect(-10,-10,GW+20,GH+20);
   drawRoom();
+  drawSlowZones();
+  drawAbilityFx();
   drawParticles();
   drawEBullets();
   drawBullets();
@@ -285,6 +325,56 @@ function draw() {
 }
 
 // ---- ZEMIN ----
+function drawSlowZones() {
+  for (const z of sSlowZones) {
+    const alpha = (z.life / 90) * 0.35;
+    ctx.fillStyle = `rgba(255,136,170,${alpha})`;
+    ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = `rgba(255,136,170,${alpha*2})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = `rgba(255,200,220,${alpha*3})`;
+    ctx.font = '14px serif'; ctx.textAlign = 'center';
+    ctx.fillText('♪', z.x - 20, z.y - 10);
+    ctx.fillText('♫', z.x + 20, z.y + 10);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawAbilityFx() {
+  for (let i = abilityFxList.length-1; i >= 0; i--) {
+    const fx = abilityFxList[i];
+    fx.life--;
+    if (fx.life <= 0) { abilityFxList.splice(i,1); continue; }
+    const alpha = fx.life / 45;
+    const cfg = ROLE_CFG[fx.role] || ROLE_CFG.esref;
+    if (fx.type === 'shield' || fx.type === 'tank') {
+      ctx.strokeStyle = cfg.color + Math.floor(alpha*255).toString(16).padStart(2,'0');
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(fx.x, fx.y, 20 + (1-alpha)*10, 0, Math.PI*2); ctx.stroke();
+    }
+    if (fx.type === 'sniper' && fx.tx !== undefined) {
+      ctx.strokeStyle = `rgba(208,160,64,${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(fx.x, fx.y); ctx.lineTo(fx.tx, fx.ty); ctx.stroke();
+    }
+    if (fx.type === 'radar') {
+      ctx.strokeStyle = `rgba(160,208,255,${alpha*0.5})`;
+      ctx.lineWidth = 1;
+      const r = (1 - alpha) * 200;
+      ctx.beginPath(); ctx.arc(GW/2, GH/2, r, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+  if (sRadarActive) {
+    for (const e of sEnemies) {
+      if (e.dead) continue;
+      ctx.strokeStyle = 'rgba(160,208,255,0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(e.x, e.y, (e.r||11)+6, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+}
+
 function drawRoom() {
   const bg = ROOM_BGS[roomIdx] || 'hotel';
   if (bg === 'hotel') drawHotel();
@@ -715,6 +805,19 @@ function updateHUD() {
   document.getElementById('hudScore').textContent = '★ '+me.score;
   document.getElementById('ammoLabel').textContent = '🔫 '+me.ammo+'/'+me.maxAmmo+(me.reloading>0?' ↺':'');
   document.getElementById('ammoFill').style.width = (me.ammo/me.maxAmmo*100)+'%';
+
+  // Yetenek göstergesi
+  const cfg = ROLE_CFG[myRole];
+  if (cfg) {
+    const abilEl = document.getElementById('abilityHud');
+    if (abilEl) {
+      const pct = myAbilityCd > 0 ? (1 - myAbilityCd / (ABILITY_CDS[myRole]||300)) * 100 : 100;
+      abilEl.textContent = `[Q] ${cfg.abilityName} ${myAbilityCd > 0 ? '⏳' : '✅'}`;
+      abilEl.style.color = myAbilityCd > 0 ? '#666' : cfg.color;
+      const fillEl = document.getElementById('abilityFill');
+      if (fillEl) fillEl.style.width = pct + '%';
+    }
+  }
 }
 
 // ================================================================

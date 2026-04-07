@@ -1,5 +1,5 @@
 // ================================================================
-// EŞREF RÜYA — 4 Oyunculu Multiplayer Server
+// EŞREF RÜYA — Multiplayer Server
 // ================================================================
 'use strict';
 const http = require('http');
@@ -12,6 +12,12 @@ const MIME = { '.html':'text/html', '.js':'application/javascript', '.css':'text
 
 const httpServer = http.createServer((req, res) => {
   let url = req.url === '/' ? '/index.html' : req.url;
+  // Render uyku önleme ping endpoint
+  if (url === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('pong');
+    return;
+  }
   if (url.startsWith('/socket.io')) {
     const f = path.join(__dirname, 'node_modules/socket.io/client-dist/socket.io.js');
     fs.readFile(f, (err, d) => {
@@ -29,33 +35,101 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
+// ---- RENDER UYKU ÖNLEME (14 dakikada bir self-ping) ----
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || null;
+if (RENDER_URL) {
+  setInterval(() => {
+    const https = require('https');
+    https.get(RENDER_URL + '/ping', r => {
+      console.log('Keep-alive ping:', r.statusCode);
+    }).on('error', e => console.log('Ping error:', e.message));
+  }, 14 * 60 * 1000); // 14 dakika
+}
+
 const io = new Server(httpServer, { cors: { origin: '*' } });
 
-// ---- ROLLER ----
-const CIVILIAN_ROLES = ['nisan', 'gurdalı', 'muslum', 'faruk'];
-const ROLE_NAMES = {
-  esref:   'Eşref',
-  nisan:   'Nisan',
-  'gurdalı': 'Gürdalı',
-  muslum:  'Müslüm',
-  faruk:   'Faruk',
+// ================================================================
+// KARAKTER TANIMLARI
+// ================================================================
+const ROLE_DEFS = {
+  esref: {
+    label: 'Eşref', icon: '🕴',
+    hp: 120, maxAmmo: 12, reloadTime: 80,
+    speed: 2.8, damage: 30,
+    ability: 'kalkan',      // hasar azaltma
+    abilityCd: 300,
+    desc: 'Koruyucu lider. Fazla hasar verir, kalkan aktive edebilir.',
+  },
+  nisan: {
+    label: 'Nisan', icon: '🎵',
+    hp: 90, maxAmmo: 10, reloadTime: 70,
+    speed: 3.4, damage: 18,
+    ability: 'muzik',       // yakındaki düşmanları yavaşlatır
+    abilityCd: 240,
+    desc: 'Hızlı müzisyen. Müzik alanı düşmanları yavaşlatır.',
+  },
+  gurdalı: {
+    label: 'Gürdalı', icon: '💪',
+    hp: 180, maxAmmo: 8, reloadTime: 110,
+    speed: 1.8, damage: 22,
+    ability: 'tank',        // geçici dokunulmazlık
+    abilityCd: 360,
+    desc: 'Tank. Çok canı var ama yavaş. Dokunulmazlık aktive edebilir.',
+  },
+  muslum: {
+    label: 'Müslüm', icon: '🔧',
+    hp: 100, maxAmmo: 10, reloadTime: 90,
+    speed: 2.5, damage: 16,
+    ability: 'heal',        // yakındaki oyuncuları iyileştirir
+    abilityCd: 280,
+    desc: 'Tamirci. Yetenek ile yakındaki takım arkadaşlarını iyileştirir.',
+  },
+  faruk: {
+    label: 'Faruk', icon: '🎯',
+    hp: 85, maxAmmo: 6, reloadTime: 120,
+    speed: 2.6, damage: 45,
+    ability: 'sniper',      // tek atış yüksek hasar
+    abilityCd: 200,
+    desc: 'Nişancı. Az mermi ama çok hasar. Sniper atışı yapar.',
+  },
+  kadir: {
+    label: 'Kadir', icon: '😈',
+    hp: 110, maxAmmo: 14, reloadTime: 75,
+    speed: 3.0, damage: 20,
+    ability: 'sabotaj',     // rastgele bir oyuncunun ammo'sunu sıfırlar
+    abilityCd: 400,
+    desc: 'HAİN! Gizlice takımı sabote edebilir. Kimse bilmez...',
+    isTraitor: true,
+  },
+  cigdem: {
+    label: 'Çiğdem', icon: '🔍',
+    hp: 95, maxAmmo: 12, reloadTime: 85,
+    speed: 2.9, damage: 18,
+    ability: 'radar',       // tüm düşman konumlarını gösterir
+    abilityCd: 220,
+    desc: 'Dedektif. Radar ile tüm düşman konumlarını ekranda gösterir.',
+  },
 };
 
-// ---- ODA YÖNETİMİ ----
+const ALL_ROLES = Object.keys(ROLE_DEFS);
+
+// ================================================================
+// ODA YÖNETİMİ
+// ================================================================
 const rooms = {};
 
-function createRoom(id) {
+function createRoom(id, ownerId) {
   rooms[id] = {
-    id,
-    players: {},       // socketId -> playerData
-    state: 'waiting',  // waiting|countdown|playing|wave_clear|room_clear|gameover|win
-    roomIdx: 0,
-    waveIdx: 0,
-    enemies: [],
-    eBullets: [],
+    id, ownerId,
+    players: {},
+    state: 'waiting',
+    roomIdx: 0, waveIdx: 0,
+    enemies: [], eBullets: [],
     eidx: 0, ebidx: 0,
     tick: null,
     readyForNext: new Set(),
+    slowZones: [],   // Nisan yeteneği
+    radarActive: 0,  // Çiğdem yeteneği
   };
 }
 
@@ -65,7 +139,6 @@ function getRoomOf(sid) {
   return null;
 }
 
-// ---- SPAWN ----
 const ROOM_W = 480, ROOM_H = 320;
 
 function edgeSpawn() {
@@ -78,28 +151,29 @@ function edgeSpawn() {
 
 function spawnWave(room) {
   const base  = 5 + room.waveIdx * 3 + room.roomIdx * 4;
-  const count = Math.min(base, 20);
-  room.enemies = [];
-  room.eBullets = [];
+  const count = Math.min(base, 22);
+  room.enemies = []; room.eBullets = [];
   for (let i = 0; i < count; i++) {
     const isBoss = room.roomIdx === 2 && room.waveIdx === 2 && i === 0;
-    const type   = isBoss ? 'kadir' : (Math.random() < 0.3 ? 'shooter' : 'thug');
+    const type   = isBoss ? 'boss' : (Math.random() < 0.3 ? 'shooter' : 'thug');
     const { x, y } = edgeSpawn();
     room.enemies.push({
       id: room.eidx++, x, y, type,
-      hp:    isBoss ? 400 : type === 'shooter' ? 35 : 50,
-      maxHp: isBoss ? 400 : type === 'shooter' ? 35 : 50,
+      hp:    isBoss ? 500 : type === 'shooter' ? 35 : 50,
+      maxHp: isBoss ? 500 : type === 'shooter' ? 35 : 50,
       spd:   isBoss ? 1.6 : type === 'shooter' ? 1.0 : 1.3,
-      r:     isBoss ? 16 : 11,
+      r: isBoss ? 18 : 11,
       shootRange: (type === 'shooter' || isBoss) ? 190 : 0,
-      shootCd: isBoss ? 55 : 85,
-      shootT:  Math.random() * 60,
-      angle: 0, dead: false,
+      shootCd: isBoss ? 50 : 85,
+      shootT: Math.random() * 60,
+      angle: 0, dead: false, slowed: 0,
     });
   }
 }
 
-// ---- TICK ----
+// ================================================================
+// TICK
+// ================================================================
 function startTick(rid) {
   const room = rooms[rid];
   if (room.tick) clearInterval(room.tick);
@@ -109,45 +183,66 @@ function startTick(rid) {
     const plist = Object.values(room.players).filter(p => p.alive);
     if (!plist.length) return;
 
+    // Slow zone tick (Nisan yeteneği)
+    for (let i = room.slowZones.length - 1; i >= 0; i--) {
+      room.slowZones[i].life--;
+      if (room.slowZones[i].life <= 0) room.slowZones.splice(i, 1);
+    }
+    if (room.radarActive > 0) room.radarActive--;
+
     // Düşman hareketi
     for (const e of room.enemies) {
       if (e.dead) continue;
+      if (e.slowed > 0) e.slowed--;
 
-      // Eşref'e öncelikli hedef
+      // En yakın oyuncuyu hedef al (Eşref öncelikli)
       let target = plist[0];
       let minD = Infinity;
       for (const p of plist) {
-        const d = Math.hypot(p.x - e.x, p.y - e.y);
+        let d = Math.hypot(p.x - e.x, p.y - e.y);
+        if (p.role === 'esref') d *= 0.7; // Eşref'e öncelik
         if (d < minD) { minD = d; target = p; }
       }
+      const realDist = Math.hypot(target.x - e.x, target.y - e.y);
       e.angle = Math.atan2(target.y - e.y, target.x - e.x);
-      if (minD > e.r + 12) {
-        e.x += Math.cos(e.angle) * e.spd;
-        e.y += Math.sin(e.angle) * e.spd;
+
+      // Slow zone kontrolü
+      let inSlow = false;
+      for (const z of room.slowZones) {
+        if (Math.hypot(e.x - z.x, e.y - z.y) < z.r) { inSlow = true; break; }
+      }
+      const spd = inSlow ? e.spd * 0.35 : (e.slowed > 0 ? e.spd * 0.5 : e.spd);
+
+      if (realDist > e.r + 12) {
+        e.x += Math.cos(e.angle) * spd;
+        e.y += Math.sin(e.angle) * spd;
         e.x = Math.max(-30, Math.min(ROOM_W + 30, e.x));
         e.y = Math.max(-30, Math.min(ROOM_H + 30, e.y));
       }
 
       // Temas hasarı
-      if (minD < e.r + 11) {
-        const dmg = e.type === 'kadir' ? 14 : 7;
-        target.hp = Math.max(0, target.hp - dmg);
-        target.invT = 40;
+      if (realDist < e.r + 11) {
+        const dmg = e.type === 'boss' ? 15 : 7;
+        // Gürdalı tank modunda hasar almaz
+        if (!(target.tankMode > 0)) {
+          target.hp = Math.max(0, target.hp - dmg);
+          target.invT = 40;
+        }
         if (target.hp <= 0) killPlayer(room, rid, target);
       }
 
       // Ateş
-      if (e.shootRange > 0 && minD < e.shootRange) {
+      if (e.shootRange > 0 && realDist < e.shootRange) {
         e.shootT--;
         if (e.shootT <= 0) {
           e.shootT = e.shootCd;
-          const spd = e.type === 'kadir' ? 5 : 4;
+          const bspd = e.type === 'boss' ? 5.5 : 4;
           room.eBullets.push({
             id: room.ebidx++,
             x: e.x + Math.cos(e.angle) * 16,
             y: e.y + Math.sin(e.angle) * 16,
-            vx: Math.cos(e.angle) * spd,
-            vy: Math.sin(e.angle) * spd,
+            vx: Math.cos(e.angle) * bspd,
+            vy: Math.sin(e.angle) * bspd,
             life: 65, r: 4,
           });
         }
@@ -158,11 +253,11 @@ function startTick(rid) {
     for (let i = room.eBullets.length - 1; i >= 0; i--) {
       const b = room.eBullets[i];
       b.x += b.vx; b.y += b.vy; b.life--;
-      if (b.life <= 0 || b.x < -10 || b.x > ROOM_W + 10 || b.y < -10 || b.y > ROOM_H + 10) {
+      if (b.life <= 0 || b.x < -10 || b.x > ROOM_W+10 || b.y < -10 || b.y > ROOM_H+10) {
         room.eBullets.splice(i, 1); continue;
       }
       for (const p of plist) {
-        if ((p.invT || 0) > 0) continue;
+        if ((p.invT||0) > 0 || (p.shieldActive||0) > 0) continue;
         if (Math.hypot(b.x - p.x, b.y - p.y) < b.r + 11) {
           p.hp = Math.max(0, p.hp - 9);
           p.invT = 28;
@@ -173,23 +268,25 @@ function startTick(rid) {
       }
     }
 
-    // invincible tick
+    // Oyuncu tick
     for (const p of Object.values(room.players)) {
       if (p.invT > 0) p.invT--;
+      if (p.shieldActive > 0) p.shieldActive--;
+      if (p.tankMode > 0) p.tankMode--;
+      if (p.abilityCdLeft > 0) p.abilityCdLeft--;
       if (p.reloading > 0) { p.reloading--; if (p.reloading === 0) p.ammo = p.maxAmmo; }
     }
 
     // Dalga bitti mi?
     if (room.enemies.every(e => e.dead)) {
       room.waveIdx++;
-      const maxW = 3;
-      if (room.waveIdx >= maxW) {
+      if (room.waveIdx >= 3) {
         if (room.roomIdx < 2) {
           room.state = 'room_clear';
           io.to(rid).emit('roomClear', { roomIdx: room.roomIdx });
         } else {
           room.state = 'win';
-          io.to(rid).emit('win', { kills: room.enemies.length });
+          io.to(rid).emit('win');
         }
       } else {
         room.state = 'wave_clear';
@@ -198,9 +295,11 @@ function startTick(rid) {
     }
 
     io.to(rid).emit('tick', {
-      enemies:  room.enemies,
+      enemies: room.enemies,
       eBullets: room.eBullets,
-      players:  room.players,
+      players: room.players,
+      slowZones: room.slowZones,
+      radarActive: room.radarActive > 0,
     });
   }, 1000 / 30);
 }
@@ -208,50 +307,47 @@ function startTick(rid) {
 function killPlayer(room, rid, p) {
   p.alive = false;
   io.to(rid).emit('playerDied', { id: p.id, role: p.role });
-
   if (p.role === 'esref') {
-    // Eşref öldü → oyun bitti
     room.state = 'gameover';
-    io.to(rid).emit('gameOver', { reason: 'Eşref düştü!' });
+    io.to(rid).emit('gameOver', { reason: 'Eşref düştü! Oyun bitti.' });
     return;
   }
-  // Tüm sivillerin ölüp ölmediğini kontrol et
-  const civilians = Object.values(room.players).filter(x => x.role !== 'esref');
-  if (civilians.every(c => !c.alive)) {
+  const alive = Object.values(room.players).filter(x => x.alive);
+  if (!alive.length) {
     room.state = 'gameover';
-    io.to(rid).emit('gameOver', { reason: 'Tüm siviller öldü!' });
+    io.to(rid).emit('gameOver', { reason: 'Herkes öldü!' });
   }
 }
 
-// ---- SOCKET OLAYLARI ----
+// ================================================================
+// SOCKET OLAYLARI
+// ================================================================
 io.on('connection', socket => {
-  console.log('+ Bağlandı:', socket.id);
+  console.log('+', socket.id);
 
   socket.on('joinRoom', ({ roomId }) => {
-    if (!rooms[roomId]) createRoom(roomId);
+    if (!rooms[roomId]) createRoom(roomId, socket.id);
     const room = rooms[roomId];
+    if (room.state !== 'waiting') { socket.emit('roomFull'); return; }
     const count = Object.keys(room.players).length;
-    if (count >= 4) { socket.emit('roomFull'); return; }
+    if (count >= 7) { socket.emit('roomFull'); return; }
 
-    // Rol ata (Eşref henüz atanmadı, oyun başlayınca atanacak)
-    const civIdx = count; // 0-3
+    const def = ROLE_DEFS.esref; // geçici, oyun başlayınca atanır
     room.players[socket.id] = {
-      id: socket.id,
-      slot: civIdx,
-      role: null,       // oyun başlayınca atanır
-      x: 200 + (civIdx % 2) * 80,
-      y: 140 + Math.floor(civIdx / 2) * 60,
+      id: socket.id, slot: count, role: null,
+      x: 200 + (count % 3) * 70, y: 130 + Math.floor(count / 3) * 70,
       angle: 0,
       hp: 100, maxHp: 100,
       ammo: 12, maxAmmo: 12,
-      reloading: 0,
-      invT: 0,
-      alive: true,
-      score: 0,
+      reloading: 0, invT: 0,
+      shieldActive: 0, tankMode: 0,
+      abilityCdLeft: 0,
+      alive: true, score: 0,
+      isOwner: count === 0,
     };
 
     socket.join(roomId);
-    socket.emit('joined', { slot: civIdx, roomId, playerCount: count + 1 });
+    socket.emit('joined', { slot: count, roomId, isOwner: count === 0 });
     io.to(roomId).emit('lobbyUpdate', {
       count: Object.keys(room.players).length,
       slots: Object.values(room.players).map(p => ({ slot: p.slot, id: p.id })),
@@ -262,27 +358,28 @@ io.on('connection', socket => {
     const res = getRoomOf(socket.id);
     if (!res) return;
     const { room, rid } = res;
-    if (Object.keys(room.players).length < 1) return; // en az 1 kişi
+    // Sadece oda sahibi başlatabilir
+    if (room.ownerId !== socket.id) return;
 
-    // Rastgele Eşref seç
     const pids = Object.keys(room.players);
-    const esrefId = pids[Math.floor(Math.random() * pids.length)];
-    const civRoles = [...CIVILIAN_ROLES];
-    for (const [sid, p] of Object.entries(room.players)) {
-      if (sid === esrefId) {
-        p.role = 'esref';
-      } else {
-        p.role = civRoles.shift();
-      }
-    }
+    // Rolleri karıştır ve ata
+    const shuffled = [...ALL_ROLES].sort(() => Math.random() - 0.5);
+    pids.forEach((sid, i) => {
+      const role = shuffled[i % shuffled.length];
+      const def  = ROLE_DEFS[role];
+      const p    = room.players[sid];
+      p.role     = role;
+      p.hp       = def.hp; p.maxHp = def.hp;
+      p.ammo     = def.maxAmmo; p.maxAmmo = def.maxAmmo;
+      p.abilityCdLeft = 0;
+    });
 
     room.state = 'playing';
     spawnWave(room);
     startTick(rid);
 
-    // Her oyuncuya kendi rolünü bildir
     for (const [sid, p] of Object.entries(room.players)) {
-      io.to(sid).emit('roleAssigned', { role: p.role, esrefId });
+      io.to(sid).emit('roleAssigned', { role: p.role });
     }
     io.to(rid).emit('gameStart', { roomIdx: 0, waveIdx: 0 });
   });
@@ -300,32 +397,31 @@ io.on('connection', socket => {
     const { room, rid } = res;
     const p = room.players[socket.id];
     if (!p || !p.alive || p.ammo <= 0 || p.reloading > 0) return;
+
+    const def = ROLE_DEFS[p.role] || ROLE_DEFS.esref;
     p.ammo--;
-    if (p.ammo === 0) p.reloading = 90;
+    if (p.ammo === 0) p.reloading = def.reloadTime;
 
     const bx = p.x + Math.cos(angle) * 15;
     const by = p.y + Math.sin(angle) * 15;
     const vx = Math.cos(angle) * 7.5;
     const vy = Math.sin(angle) * 7.5;
 
-    // Çarpışma
     for (const e of room.enemies) {
       if (e.dead) continue;
-      let tx = bx, ty = by;
-      let hit = false;
-      for (let s = 0; s < 55; s++) {
+      let tx = bx, ty = by, hit = false;
+      for (let s = 0; s < 60; s++) {
         tx += vx / 7.5; ty += vy / 7.5;
         if (Math.hypot(tx - e.x, ty - e.y) < e.r + 4) { hit = true; break; }
       }
       if (hit) {
-        const dmg = p.role === 'esref' ? 28 : 18;
-        e.hp -= dmg;
+        e.hp -= def.damage;
         if (e.hp <= 0) {
           e.dead = true;
-          p.score += e.type === 'kadir' ? 500 : e.type === 'shooter' ? 80 : 40;
-          if (e.type === 'kadir') io.to(rid).emit('dialog', { speaker: 'Eşref', text: 'Kadir! Artık bitti.' });
+          p.score += e.type === 'boss' ? 500 : e.type === 'shooter' ? 80 : 40;
+          if (e.type === 'boss') io.to(rid).emit('dialog', { speaker: 'Eşref', text: 'Kadir! Artık bitti.' });
         }
-        io.to(rid).emit('hit', { ex: e.x, ey: e.y, dead: e.dead, type: e.type });
+        io.to(rid).emit('hit', { ex: e.x, ey: e.y, dead: e.dead });
         break;
       }
     }
@@ -336,7 +432,88 @@ io.on('connection', socket => {
     const res = getRoomOf(socket.id);
     if (!res) return;
     const p = res.room.players[socket.id];
-    if (p && p.reloading === 0 && p.ammo < p.maxAmmo) p.reloading = 90;
+    const def = ROLE_DEFS[p?.role] || ROLE_DEFS.esref;
+    if (p && p.reloading === 0 && p.ammo < p.maxAmmo) p.reloading = def.reloadTime;
+  });
+
+  // ---- YETENEK ----
+  socket.on('ability', () => {
+    const res = getRoomOf(socket.id);
+    if (!res) return;
+    const { room, rid } = res;
+    const p = room.players[socket.id];
+    if (!p || !p.alive || p.abilityCdLeft > 0) return;
+    const def = ROLE_DEFS[p.role];
+    if (!def) return;
+
+    p.abilityCdLeft = def.abilityCd;
+
+    switch (p.role) {
+      case 'esref':
+        // Kalkan: 2 saniyelik hasar azaltma
+        p.shieldActive = 60;
+        io.to(rid).emit('abilityFx', { role: 'esref', x: p.x, y: p.y, type: 'shield' });
+        break;
+
+      case 'nisan':
+        // Müzik alanı: 3 saniyelik yavaşlatma bölgesi
+        room.slowZones.push({ x: p.x, y: p.y, r: 80, life: 90 });
+        io.to(rid).emit('abilityFx', { role: 'nisan', x: p.x, y: p.y, type: 'music' });
+        break;
+
+      case 'gurdalı':
+        // Tank modu: 2 saniyelik dokunulmazlık
+        p.tankMode = 60;
+        p.invT = 60;
+        io.to(rid).emit('abilityFx', { role: 'gurdalı', x: p.x, y: p.y, type: 'tank' });
+        break;
+
+      case 'muslum':
+        // İyileştirme: yakındaki oyuncuları 30 HP iyileştirir
+        for (const op of Object.values(room.players)) {
+          if (!op.alive) continue;
+          if (Math.hypot(op.x - p.x, op.y - p.y) < 100) {
+            op.hp = Math.min(op.maxHp, op.hp + 30);
+          }
+        }
+        io.to(rid).emit('abilityFx', { role: 'muslum', x: p.x, y: p.y, type: 'heal' });
+        break;
+
+      case 'faruk':
+        // Sniper: en yakın düşmana 120 hasar
+        let closest = null, minD = Infinity;
+        for (const e of room.enemies) {
+          if (e.dead) continue;
+          const d = Math.hypot(e.x - p.x, e.y - p.y);
+          if (d < minD) { minD = d; closest = e; }
+        }
+        if (closest) {
+          closest.hp -= 120;
+          if (closest.hp <= 0) { closest.dead = true; p.score += 100; }
+          io.to(rid).emit('abilityFx', { role: 'faruk', x: p.x, y: p.y, tx: closest.x, ty: closest.y, type: 'sniper' });
+        }
+        break;
+
+      case 'kadir':
+        // Sabotaj: rastgele bir takım arkadaşının ammo'sunu sıfırla (hain!)
+        const others = Object.values(room.players).filter(op => op.id !== p.id && op.alive);
+        if (others.length) {
+          const victim = others[Math.floor(Math.random() * others.length)];
+          victim.ammo = 0;
+          victim.reloading = ROLE_DEFS[victim.role]?.reloadTime || 90;
+          io.to(victim.id).emit('sabotaged', { by: 'Kadir' });
+          // Sadece Kadir'e bildir
+          io.to(socket.id).emit('abilityFx', { role: 'kadir', x: p.x, y: p.y, type: 'sabotaj' });
+        }
+        break;
+
+      case 'cigdem':
+        // Radar: 5 saniyelik düşman görünürlüğü
+        room.radarActive = 150;
+        io.to(rid).emit('abilityFx', { role: 'cigdem', x: p.x, y: p.y, type: 'radar' });
+        io.to(rid).emit('dialog', { speaker: 'Çiğdem', text: 'Radar aktif! Tüm düşmanlar görünüyor.' });
+        break;
+    }
   });
 
   socket.on('nextWave', () => {
@@ -366,7 +543,7 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
-    console.log('- Ayrıldı:', socket.id);
+    console.log('-', socket.id);
     const res = getRoomOf(socket.id);
     if (!res) return;
     const { room, rid } = res;
@@ -380,15 +557,5 @@ io.on('connection', socket => {
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
-  const { networkInterfaces } = require('os');
-  const nets = networkInterfaces();
-  let localIP = 'localhost';
-  for (const iface of Object.values(nets)) {
-    for (const n of iface) {
-      if (n.family === 'IPv4' && !n.internal) { localIP = n.address; break; }
-    }
-  }
-  console.log(`🎮 Eşref Rüya Multiplayer`);
-  console.log(`   Bu PC:    http://localhost:${PORT}`);
-  console.log(`   Ağdaki cihazlar: http://${localIP}:${PORT}`);
+  console.log(`🎮 Eşref Rüya: http://localhost:${PORT}`);
 });
