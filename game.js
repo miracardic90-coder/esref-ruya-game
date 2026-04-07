@@ -77,7 +77,7 @@ socket.on('joined', d => {
   document.getElementById('lobbyCode').style.display = 'block';
   document.getElementById('lobbyCode').textContent   = d.roomId;
   document.getElementById('lobbyStatus').textContent = `Slot ${d.slot+1} — ${d.playerCount}/4 oyuncu`;
-  if (d.slot === 0) document.getElementById('btnStart').style.display = 'block';
+  if (d.slot === 0 || true) document.getElementById('btnStart').style.display = 'block';
 });
 
 socket.on('roomFull', () => setStatus('❌ Oda dolu!'));

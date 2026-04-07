@@ -347,7 +347,7 @@ io.on('connection', socket => {
     };
 
     socket.join(roomId);
-    socket.emit('joined', { slot: count, roomId, isOwner: count === 0 });
+    socket.emit('joined', { slot: count, roomId, isOwner: true });
     io.to(roomId).emit('lobbyUpdate', {
       count: Object.keys(room.players).length,
       slots: Object.values(room.players).map(p => ({ slot: p.slot, id: p.id })),
@@ -358,8 +358,7 @@ io.on('connection', socket => {
     const res = getRoomOf(socket.id);
     if (!res) return;
     const { room, rid } = res;
-    // Sadece oda sahibi başlatabilir
-    if (room.ownerId !== socket.id) return;
+    // Oda sahibi veya tek kişi başlatabilir
 
     const pids = Object.keys(room.players);
     // Rolleri karıştır ve ata
