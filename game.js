@@ -159,6 +159,8 @@ socket.on('sabotaged', d => {
   setTimeout(hideDialog, 3000);
   screenShake = 15;
 });
+
+socket.on('hit', d => {
   spawnParticles(d.ex, d.ey, d.dead ? '#c8a84b' : '#ff8844', d.dead ? 14 : 6);
   if (d.dead) screenShake = 8;
 });
